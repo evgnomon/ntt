@@ -1,27 +1,141 @@
 const std = @import("std");
 const ntt = @import("ntt");
+const posix = std.posix;
+const c = std.c;
+
+const linux = std.os.linux;
+
+// Extern C functions
+extern "c" fn openpty(
+    master: *c_int,
+    slave: *c_int,
+    name: ?[*]u8,
+    termp: ?*const posix.termios,
+    winsize: ?*const anyopaque,
+) c_int;
+
+// Terminal control constants for Linux
+const IGNBRK: u32 = 0o000001;
+const BRKINT: u32 = 0o000002;
+const PARMRK: u32 = 0o000010;
+const ISTRIP: u32 = 0o000040;
+const INLCR: u32 = 0o000100;
+const IGNCR: u32 = 0o000200;
+const ICRNL: u32 = 0o000400;
+const IXON: u32 = 0o002000;
+const OPOST: u32 = 0o000001;
+const ECHO: u32 = 0o000010;
+const ECHONL: u32 = 0o000100;
+const ICANON: u32 = 0o000002;
+const ISIG: u32 = 0o000001;
+const IEXTEN: u32 = 0o100000;
+const CSIZE: u32 = 0o000060;
+const PARENB: u32 = 0o000400;
+const CS8: u32 = 0o000060;
+const VMIN: usize = 6;
+const VTIME: usize = 5;
+const TIOCSCTTY: u32 = 0x540E;
 
 pub fn main() !void {
-    // Prints to stderr, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-    try ntt.bufferedPrint();
-}
+    // Step 1: Save original terminal attributes and enter raw mode
+    const stdin_fd = posix.STDIN_FILENO;
+    const stdout_fd = posix.STDOUT_FILENO;
+    const stderr_fd = posix.STDERR_FILENO;
 
-test "simple test" {
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(i32) = .empty;
-    defer list.deinit(gpa); // Try commenting this out and see if zig detects the memory leak!
-    try list.append(gpa, 42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
-}
+    const orig_termios = try posix.tcgetattr(stdin_fd);
+    defer posix.tcsetattr(stdin_fd, .FLUSH, orig_termios) catch {}; // Restore on exit
 
-test "fuzz example" {
-    const Context = struct {
-        fn testOne(context: @This(), input: []const u8) anyerror!void {
-            _ = context;
-            // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
-            try std.testing.expect(!std.mem.eql(u8, "canyoufindme", input));
-        }
+    var raw_termios = orig_termios;
+
+    // Work with raw integer values for the flags
+    var iflag_raw = @as(u32, @bitCast(raw_termios.iflag));
+    iflag_raw &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL | IXON);
+    raw_termios.iflag = @bitCast(iflag_raw);
+
+    var oflag_raw = @as(u32, @bitCast(raw_termios.oflag));
+    oflag_raw &= ~OPOST;
+    raw_termios.oflag = @bitCast(oflag_raw);
+
+    var lflag_raw = @as(u32, @bitCast(raw_termios.lflag));
+    lflag_raw &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+    raw_termios.lflag = @bitCast(lflag_raw);
+
+    var cflag_raw = @as(u32, @bitCast(raw_termios.cflag));
+    cflag_raw &= ~(CSIZE | PARENB);
+    cflag_raw |= CS8;
+    raw_termios.cflag = @bitCast(cflag_raw);
+
+    raw_termios.cc[VMIN] = 1; // Read at least 1 byte
+    raw_termios.cc[VTIME] = 0; // No timeout
+    try posix.tcsetattr(stdin_fd, .FLUSH, raw_termios);
+
+    // Step 2: Create PTY
+    var master_fd: c_int = undefined;
+    var slave_fd: c_int = undefined;
+    _ = openpty(&master_fd, &slave_fd, null, null, null);
+
+    // Step 3: Fork and exec bash in child
+    const pid = try posix.fork();
+    if (pid == 0) {
+        // Child: Set up slave PTY as stdin/stdout/stderr and exec bash
+        posix.close(master_fd); // Child doesn't need master
+        _ = try posix.dup2(slave_fd, stdin_fd);
+        _ = try posix.dup2(slave_fd, stdout_fd);
+        _ = try posix.dup2(slave_fd, stderr_fd);
+        posix.close(slave_fd); // No longer needed
+
+        // Set controlling terminal
+        _ = try posix.setsid();
+        _ = linux.ioctl(slave_fd, TIOCSCTTY, @as(c_int, 0));
+
+        // Exec bash
+        const argv = [_:null]?[*:0]const u8{ "bash", null };
+        _ = posix.execveZ("/bin/bash", &argv, std.c.environ) catch {};
+        std.posix.exit(1);
+    }
+
+    // Parent: Close slave, handle I/O
+    posix.close(slave_fd);
+
+    // Step 4: I/O loop with polling to avoid blocking
+    var buf: [1024]u8 = undefined;
+    var pollfds = [_]posix.pollfd{
+        .{ .fd = stdin_fd, .events = posix.POLL.IN, .revents = 0 },
+        .{ .fd = master_fd, .events = posix.POLL.IN, .revents = 0 },
     };
-    try std.testing.fuzz(Context{}, Context.testOne, .{});
+
+    while (true) {
+        // Poll both stdin and PTY master
+        _ = posix.poll(&pollfds, -1) catch break;
+
+        // Check if stdin has data (user input)
+        if (pollfds[0].revents & posix.POLL.IN != 0) {
+            if (posix.read(stdin_fd, &buf)) |n| {
+                if (n == 0) break; // EOF
+                _ = posix.write(master_fd, buf[0..n]) catch break;
+            } else |_| break;
+        }
+
+        // Check if PTY has data (bash output)
+        if (pollfds[1].revents & posix.POLL.IN != 0) {
+            if (posix.read(master_fd, &buf)) |n| {
+                if (n == 0) break; // PTY closed
+                _ = posix.write(stdout_fd, buf[0..n]) catch break;
+            } else |_| break;
+        }
+
+        // Check for hangup/error conditions
+        if (pollfds[0].revents & posix.POLL.HUP != 0 or
+            pollfds[1].revents & posix.POLL.HUP != 0)
+        {
+            break;
+        }
+
+        // Reset revents for next poll
+        pollfds[0].revents = 0;
+        pollfds[1].revents = 0;
+    }
+
+    // Wait for child
+    _ = posix.waitpid(pid, 0);
 }
