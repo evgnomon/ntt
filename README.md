@@ -1,4 +1,5 @@
-# NTT - Transparent Terminal
+# NTT Transparent Terminal
+> Terminal is not an emulation anymore, everything else is!
 
 ```
 ███╗   ██╗████████╗████████╗
