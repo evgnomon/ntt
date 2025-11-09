@@ -102,6 +102,3 @@ This project is licensed under the HGL License
 - Built with [Zig](https://ziglang.org/) - a modern systems programming language
 - Thanks to all contributors and early adopters
 
----
-
-**Made with ⚡ and Zig** | [Documentation](https://github.com/evgnomon/ntt/wiki) | [Report Bug](https://github.com/evgnomon/ntt/issues) | [Request Feature](https://github.com/evgnomon/ntt/issues)
