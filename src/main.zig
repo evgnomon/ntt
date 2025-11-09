@@ -35,6 +35,30 @@ const CS8: u32 = 0o000060;
 const VMIN: usize = 6;
 const VTIME: usize = 5;
 const TIOCSCTTY: u32 = 0x540E;
+const TIOCGWINSZ: u32 = 0x5413;
+const TIOCSWINSZ: u32 = 0x5414;
+
+// Window size structure
+const winsize = extern struct {
+    ws_row: u16,
+    ws_col: u16,
+    ws_xpixel: u16,
+    ws_ypixel: u16,
+};
+
+// Global variables for signal handler
+var global_master_fd: c_int = -1;
+var global_stdin_fd: c_int = -1;
+
+// Signal handler for window resize
+fn handleSigwinch(_: c_int) callconv(.c) void {
+    if (global_master_fd < 0 or global_stdin_fd < 0) return;
+
+    var ws: winsize = undefined;
+    if (linux.ioctl(global_stdin_fd, TIOCGWINSZ, @intFromPtr(&ws)) == 0) {
+        _ = linux.ioctl(global_master_fd, TIOCSWINSZ, @intFromPtr(&ws));
+    }
+}
 
 pub fn main() !void {
     // Step 1: Save original terminal attributes and enter raw mode
@@ -69,12 +93,22 @@ pub fn main() !void {
     raw_termios.cc[VTIME] = 0; // No timeout
     try posix.tcsetattr(stdin_fd, .FLUSH, raw_termios);
 
-    // Step 2: Create PTY
+    // Step 2: Get current terminal window size
+    var ws: winsize = undefined;
+    if (linux.ioctl(stdin_fd, TIOCGWINSZ, @intFromPtr(&ws)) != 0) {
+        // If we can't get size, use reasonable defaults
+        ws.ws_row = 24;
+        ws.ws_col = 80;
+        ws.ws_xpixel = 0;
+        ws.ws_ypixel = 0;
+    }
+
+    // Step 3: Create PTY with the window size
     var master_fd: c_int = undefined;
     var slave_fd: c_int = undefined;
-    _ = openpty(&master_fd, &slave_fd, null, null, null);
+    _ = openpty(&master_fd, &slave_fd, null, null, @ptrCast(&ws));
 
-    // Step 3: Fork and exec bash in child
+    // Step 4: Fork and exec bash in child
     const pid = try posix.fork();
     if (pid == 0) {
         // Child: Set up slave PTY as stdin/stdout/stderr and exec bash
@@ -97,7 +131,19 @@ pub fn main() !void {
     // Parent: Close slave, handle I/O
     posix.close(slave_fd);
 
-    // Step 4: I/O loop with polling to avoid blocking
+    // Step 5: Set up SIGWINCH handler to update PTY size on terminal resize
+    const sa = posix.Sigaction{
+        .handler = .{ .handler = handleSigwinch },
+        .mask = [_]c_ulong{0} ** 16,
+        .flags = posix.SA.RESTART,
+    };
+    posix.sigaction(posix.SIG.WINCH, &sa, null);
+
+    // Store master_fd and stdin_fd in globals for signal handler
+    global_master_fd = master_fd;
+    global_stdin_fd = stdin_fd;
+
+    // Step 6: I/O loop with polling to avoid blocking
     var buf: [1024]u8 = undefined;
     var pollfds = [_]posix.pollfd{
         .{ .fd = stdin_fd, .events = posix.POLL.IN, .revents = 0 },
