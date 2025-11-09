@@ -20,13 +20,13 @@
 
 ## Why NTT?
 
-NTT is not tmux. Tmux is bloat, it's time for a fresh approach. **NTT** (NTT Transparent Terminal or NTT is not tmux) reimagines what a terminal multiplexer can be:
+NTT trashes tmux. Tmux is bloat, it's time for a fresh approach. **NTT** (NTT Transparent Terminal or NTT trashes tmux) reimagines what a terminal multiplexer should be:
 
 - **🚀 Performance First** - Written in Zig for maximum speed and minimal resource usage
-- **🎨 Modern UX** - There shouldn't be any sign og multiplexer in your way
-- **🔄 Drop-in Compatible** - No-keybindings, just commands.
-- **🪶 Zero Dependencies** - Single binary, no runtime dependencies
-- **🔍 Transparent** - Crystal clear session management and debugging without any sign of multiplexer
+- **🎨 Modern UX** - A short list of commands and that is all, call it everywhere!
+- **🔄 Drop-in Compatible** - No-keybindings, just commands, zero wrong key pressing.
+- **🪶 Zero Dependencies** - Single binary, no runtime dependencies.
+- **🔍 Transparent** - Crystal clear session management and debugging without any sign of multiplexer.
 
 ## Installation
 
