@@ -149,46 +149,79 @@ fn handleCommand(cmd: []const u8, ws: *const winsize) !void {
     var iter = std.mem.splitScalar(u8, cmd, ' ');
     const command = iter.first();
 
-    if (std.mem.eql(u8, command, "hello")) {
-        // Create /tmp/commands file and write "hi"
-        const file = try std.fs.openFileAbsolute("/tmp/commands", .{ .mode = .write_only });
-        defer file.close();
-        try file.seekFromEnd(0);
-        try file.writeAll("received hello\n");
-    } else if (std.mem.eql(u8, command, "new")) {
+    if (std.mem.eql(u8, command, "new")) {
         // Create a new terminal session
         const new_session = try createTerminalSession(ws);
         try terminals.append(global_allocator, new_session);
-
-        // Log to /tmp/commands
-        const file = try std.fs.openFileAbsolute("/tmp/commands", .{ .mode = .write_only });
-        defer file.close();
-        try file.seekFromEnd(0);
-        const msg = try std.fmt.allocPrint(global_allocator, "new terminal created (total: {d})\n", .{terminals.items.len});
-        defer global_allocator.free(msg);
-        try file.writeAll(msg);
+        // Immediately switch to the new terminal
+        current_terminal_index = terminals.items.len - 1;
+        global_master_fd = new_session.master_fd;
     } else if (std.mem.eql(u8, command, "next")) {
         // Switch to next terminal in round-robin fashion
         if (terminals.items.len > 0) {
             current_terminal_index = (current_terminal_index + 1) % terminals.items.len;
             global_master_fd = terminals.items[current_terminal_index].master_fd;
-
-            // Log to /tmp/commands
-            const file = try std.fs.openFileAbsolute("/tmp/commands", .{ .mode = .write_only });
-            defer file.close();
-            try file.seekFromEnd(0);
-            const msg = try std.fmt.allocPrint(global_allocator, "switched to terminal {d} of {d}\n", .{current_terminal_index + 1, terminals.items.len});
-            defer global_allocator.free(msg);
-            try file.writeAll(msg);
         }
     }
 }
 
-pub fn main() !void {
-    // Initialize allocator
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+// Client mode: send command to running server
+fn runClient(allocator: std.mem.Allocator, args: []const [:0]u8) !void {
+    // Find the master process by looking for socket files
+    const tmp_dir = try std.fs.openDirAbsolute("/tmp", .{ .iterate = true });
+    var dir = tmp_dir;
+    defer dir.close();
+
+    var found_socket: ?[]u8 = null;
+    var iter = dir.iterate();
+
+    while (try iter.next()) |entry| {
+        if (entry.kind == .unix_domain_socket and std.mem.startsWith(u8, entry.name, "ntt-") and std.mem.endsWith(u8, entry.name, ".sock")) {
+            found_socket = try allocator.dupe(u8, entry.name);
+            break;
+        }
+    }
+
+    if (found_socket == null) {
+        std.debug.print("Error: No ntt server process found. Please start ntt first.\n", .{});
+        return error.NoMasterProcess;
+    }
+    defer allocator.free(found_socket.?);
+
+    // Create socket path
+    var path_buf: [256]u8 = undefined;
+    const socket_path = try std.fmt.bufPrintZ(&path_buf, "/tmp/{s}", .{found_socket.?});
+
+    // Create socket and connect
+    const sock_fd = try posix.socket(AF_UNIX, SOCK_STREAM, 0);
+    defer posix.close(sock_fd);
+
+    var addr = std.mem.zeroes(sockaddr_un);
+    addr.sun_family = AF_UNIX;
+    @memcpy(addr.sun_path[0..socket_path.len], socket_path);
+
+    const addr_ptr: *const posix.sockaddr = @ptrCast(&addr);
+    try posix.connect(sock_fd, addr_ptr, @sizeOf(sockaddr_un));
+
+    // Build command string from arguments
+    var cmd_buf: [1024]u8 = undefined;
+    var cmd_len: usize = 0;
+
+    for (args[1..]) |arg| {
+        if (cmd_len > 0) {
+            cmd_buf[cmd_len] = ' ';
+            cmd_len += 1;
+        }
+        @memcpy(cmd_buf[cmd_len .. cmd_len + arg.len], arg);
+        cmd_len += arg.len;
+    }
+
+    // Send command
+    _ = try posix.write(sock_fd, cmd_buf[0..cmd_len]);
+}
+
+// Server mode: run the terminal multiplexer
+fn runServer(allocator: std.mem.Allocator) !void {
     global_allocator = allocator;
 
     // Initialize terminals array
@@ -339,4 +372,24 @@ pub fn main() !void {
     }
 
     // Cleanup handled by defer
+}
+
+pub fn main() !void {
+    // Initialize allocator
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Get command line arguments
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    // If no arguments, run as server; otherwise run as client
+    if (args.len == 1) {
+        // No arguments - run as server
+        try runServer(allocator);
+    } else {
+        // Has arguments - run as client
+        try runClient(allocator, args);
+    }
 }

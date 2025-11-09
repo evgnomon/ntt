@@ -20,13 +20,13 @@
 
 ## Why NTT?
 
-Traditional terminal multiplexers have served us well, but it's time for a fresh approach. **NTT** (NTT Transparent Terminal) reimagines what a terminal multiplexer can be:
+NTT is not tmux. Tmux is bloat, it's time for a fresh approach. **NTT** (NTT Transparent Terminal or NTT is not tmux) reimagines what a terminal multiplexer can be:
 
 - **🚀 Performance First** - Written in Zig for maximum speed and minimal resource usage
-- **🎨 Modern UX** - No NTT is the default! There shouldn't be any sign og multiplexer in your way
-- **🔄 Drop-in Compatible** - Short keybindings to remember
+- **🎨 Modern UX** - There shouldn't be any sign og multiplexer in your way
+- **🔄 Drop-in Compatible** - No-keybindings, just commands.
 - **🪶 Zero Dependencies** - Single binary, no runtime dependencies
-- **🔍 Transparent** - Crystal clear session management and debugging
+- **🔍 Transparent** - Crystal clear session management and debugging without any sign of multiplexer
 
 ## Installation
 
@@ -56,36 +56,7 @@ ntt
 ```
 
 ## Key Bindings
-
-Default prefix key: `Ctrl-b` (same as tmux)
-
-### Sessions
-| Key | Action |
-|-----|--------|
-| `Ctrl-b Ctrl-b` | Ctrl-b |
-| `Ctrl-b Ctrl-b` | Ctrl-b |
-
-## Configuration
-
-Create `~/.config/ntt/ntt.conf`:
-
-```conf
-# Set prefix to Ctrl-a (like screen)
-set-option -g prefix C-a
-
-# Enable mouse support
-set-option -g mouse on
-
-# Set status bar colors
-set-option -g status-bg black
-set-option -g status-fg white
-
-# Set window title
-set-option -g set-titles on
-set-option -g set-titles-string "NTT: #S"
-```
-
-## Development
+No keybindings by design.
 
 ### Building
 
@@ -102,18 +73,9 @@ zig build run
 
 ## Roadmap
 
-- [x] Project initialization
-- [ ] Core terminal emulation
-- [ ] Session management
-- [ ] Window/pane splitting
-- [ ] Status bar rendering
-- [ ] Key binding system
-- [ ] Configuration parser
-- [ ] tmux compatibility layer
-- [ ] Copy mode
-- [ ] Plugin system
-- [ ] Session sharing
-- [ ] Windows support
+- [X] Project initialization
+- [X] Core terminal emulation
+- [ ] Proper handling of close event
 
 ## Contributing
 
@@ -131,7 +93,6 @@ This project is licensed under the HGL License
 
 ## Acknowledgments
 
-- Inspired by [tmux](https://github.com/tmux/tmux) and [Zellij](https://github.com/zellij-org/zellij)
 - Built with [Zig](https://ziglang.org/) - a modern systems programming language
 - Thanks to all contributors and early adopters
 
