@@ -73,6 +73,9 @@ var global_allocator: std.mem.Allocator = undefined;
 var global_socket_path: [108]u8 = undefined;
 var global_socket_path_len: usize = 0;
 
+// PID file path
+const PID_FILE_PATH = "/tmp/ntt.pid";
+
 // Signal handler for window resize
 fn handleSigwinch(_: posix.SIG) callconv(.c) void {
     if (global_master_fd < 0 or global_stdin_fd < 0) return;
@@ -167,19 +170,47 @@ fn handleCommand(cmd: []const u8, ws: *const winsize) !void {
     }
 }
 
-// Find a running ntt server socket, returns null if none found
-fn findServerSocket(allocator: std.mem.Allocator) !?[]u8 {
-    const tmp_dir = std.fs.openDirAbsolute("/tmp", .{ .iterate = true }) catch return null;
-    var dir = tmp_dir;
-    defer dir.close();
+// Write PID file with server's PID
+fn writePidFile(pid: posix.pid_t) !void {
+    const file = try std.fs.createFileAbsolute(PID_FILE_PATH, .{});
+    defer file.close();
+    var buf: [32]u8 = undefined;
+    const pid_str = try std.fmt.bufPrint(&buf, "{d}", .{pid});
+    try file.writeAll(pid_str);
+}
 
-    var iter = dir.iterate();
-    while (try iter.next()) |entry| {
-        if (entry.kind == .unix_domain_socket and std.mem.startsWith(u8, entry.name, "ntt-") and std.mem.endsWith(u8, entry.name, ".sock")) {
-            return try allocator.dupe(u8, entry.name);
-        }
-    }
-    return null;
+// Remove PID file
+fn removePidFile() void {
+    std.fs.deleteFileAbsolute(PID_FILE_PATH) catch {};
+}
+
+// Read PID from PID file and return socket name, returns null if no valid server
+fn findServerSocket(allocator: std.mem.Allocator) !?[]u8 {
+    // Read PID from file
+    const file = std.fs.openFileAbsolute(PID_FILE_PATH, .{}) catch return null;
+    defer file.close();
+
+    var buf: [32]u8 = undefined;
+    const bytes_read = file.read(&buf) catch return null;
+    if (bytes_read == 0) return null;
+
+    const pid_str = std.mem.trimRight(u8, buf[0..bytes_read], &[_]u8{ '\n', '\r', ' ', '\t' });
+    const pid = std.fmt.parseInt(posix.pid_t, pid_str, 10) catch return null;
+
+    // Build socket name and path
+    var socket_name_buf: [64]u8 = undefined;
+    const socket_name = try std.fmt.bufPrint(&socket_name_buf, "ntt-{d}.sock", .{pid});
+
+    // Check if socket file exists (verifies server is likely running)
+    var socket_path_buf: [128]u8 = undefined;
+    const socket_path = std.fmt.bufPrint(&socket_path_buf, "/tmp/{s}", .{socket_name}) catch return null;
+    std.fs.accessAbsolute(socket_path, .{}) catch {
+        // Socket doesn't exist, clean up stale PID file
+        removePidFile();
+        return null;
+    };
+
+    return try allocator.dupe(u8, socket_name);
 }
 
 // Send a command to the running server
@@ -317,12 +348,17 @@ fn runServer(allocator: std.mem.Allocator) !void {
     try terminals.append(allocator, first_session);
     current_terminal_index = 0;
 
-    const pid = first_session.child_pid;
+    // Use our own PID (the ntt server process) for socket and PID file
+    const server_pid = linux.getpid();
 
     // Create command socket for IPC
-    const sock_fd = try createCommandSocket(pid);
+    const sock_fd = try createCommandSocket(@intCast(server_pid));
     defer posix.close(sock_fd);
     defer std.posix.unlink(global_socket_path[0..global_socket_path_len :0]) catch {};
+
+    // Write PID file so clients can find us
+    try writePidFile(@intCast(server_pid));
+    defer removePidFile();
 
     // Step 5: Set up SIGWINCH handler to update PTY size on terminal resize
     const sa = posix.Sigaction{
