@@ -70,9 +70,11 @@ var global_stdin_fd: c_int = -1;
 var terminals: std.ArrayList(TerminalSession) = undefined;
 var current_terminal_index: usize = 0;
 var global_allocator: std.mem.Allocator = undefined;
+var global_socket_path: [108]u8 = undefined;
+var global_socket_path_len: usize = 0;
 
 // Signal handler for window resize
-fn handleSigwinch(_: c_int) callconv(.c) void {
+fn handleSigwinch(_: posix.SIG) callconv(.c) void {
     if (global_master_fd < 0 or global_stdin_fd < 0) return;
 
     var ws: winsize = undefined;
@@ -124,8 +126,8 @@ fn createCommandSocket(pid: posix.pid_t) !c_int {
     addr.sun_family = AF_UNIX;
 
     // Create socket path: /tmp/ntt-<pid>.sock
-    var path_buf: [108]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/ntt-{d}.sock", .{pid});
+    const path = try std.fmt.bufPrintZ(&global_socket_path, "/tmp/ntt-{d}.sock", .{pid});
+    global_socket_path_len = path.len;
     @memcpy(addr.sun_path[0..path.len], path);
 
     // Remove old socket file if it exists
@@ -165,32 +167,26 @@ fn handleCommand(cmd: []const u8, ws: *const winsize) !void {
     }
 }
 
-// Client mode: send command to running server
-fn runClient(allocator: std.mem.Allocator, args: []const [:0]u8) !void {
-    // Find the master process by looking for socket files
-    const tmp_dir = try std.fs.openDirAbsolute("/tmp", .{ .iterate = true });
+// Find a running ntt server socket, returns null if none found
+fn findServerSocket(allocator: std.mem.Allocator) !?[]u8 {
+    const tmp_dir = std.fs.openDirAbsolute("/tmp", .{ .iterate = true }) catch return null;
     var dir = tmp_dir;
     defer dir.close();
 
-    var found_socket: ?[]u8 = null;
     var iter = dir.iterate();
-
     while (try iter.next()) |entry| {
         if (entry.kind == .unix_domain_socket and std.mem.startsWith(u8, entry.name, "ntt-") and std.mem.endsWith(u8, entry.name, ".sock")) {
-            found_socket = try allocator.dupe(u8, entry.name);
-            break;
+            return try allocator.dupe(u8, entry.name);
         }
     }
+    return null;
+}
 
-    if (found_socket == null) {
-        std.debug.print("Error: No ntt server process found. Please start ntt first.\n", .{});
-        return error.NoMasterProcess;
-    }
-    defer allocator.free(found_socket.?);
-
+// Send a command to the running server
+fn sendCommand(socket_name: []const u8, cmd: []const u8) !void {
     // Create socket path
     var path_buf: [256]u8 = undefined;
-    const socket_path = try std.fmt.bufPrintZ(&path_buf, "/tmp/{s}", .{found_socket.?});
+    const socket_path = try std.fmt.bufPrintZ(&path_buf, "/tmp/{s}", .{socket_name});
 
     // Create socket and connect
     const sock_fd = try posix.socket(AF_UNIX, SOCK_STREAM, 0);
@@ -202,6 +198,21 @@ fn runClient(allocator: std.mem.Allocator, args: []const [:0]u8) !void {
 
     const addr_ptr: *const posix.sockaddr = @ptrCast(&addr);
     try posix.connect(sock_fd, addr_ptr, @sizeOf(sockaddr_un));
+
+    // Send command
+    _ = try posix.write(sock_fd, cmd);
+}
+
+// Client mode: send command to running server
+fn runClient(allocator: std.mem.Allocator, args: []const [:0]u8) !void {
+    // Find the master process by looking for socket files
+    const found_socket = try findServerSocket(allocator);
+
+    if (found_socket == null) {
+        std.debug.print("Error: No ntt server process found. Please start ntt first.\n", .{});
+        return error.NoMasterProcess;
+    }
+    defer allocator.free(found_socket.?);
 
     // Build command string from arguments
     var cmd_buf: [1024]u8 = undefined;
@@ -216,8 +227,33 @@ fn runClient(allocator: std.mem.Allocator, args: []const [:0]u8) !void {
         cmd_len += arg.len;
     }
 
-    // Send command
-    _ = try posix.write(sock_fd, cmd_buf[0..cmd_len]);
+    try sendCommand(found_socket.?, cmd_buf[0..cmd_len]);
+}
+
+// Close a terminal and switch to the next one
+fn closeTerminal(index: usize) void {
+    if (index >= terminals.items.len) return;
+
+    const terminal = terminals.items[index];
+    posix.close(terminal.master_fd);
+    _ = posix.waitpid(terminal.child_pid, 0);
+
+    // Remove the terminal from the list
+    _ = terminals.orderedRemove(index);
+
+    // If no terminals left, we'll exit
+    if (terminals.items.len == 0) return;
+
+    // Switch to the next terminal (the one that was after the closed one)
+    // If we closed the last terminal, wrap around to the first
+    if (index >= terminals.items.len) {
+        current_terminal_index = 0;
+    } else {
+        // The next terminal is now at the same index (since we removed one)
+        current_terminal_index = index;
+    }
+
+    global_master_fd = terminals.items[current_terminal_index].master_fd;
 }
 
 // Server mode: run the terminal multiplexer
@@ -286,6 +322,7 @@ fn runServer(allocator: std.mem.Allocator) !void {
     // Create command socket for IPC
     const sock_fd = try createCommandSocket(pid);
     defer posix.close(sock_fd);
+    defer std.posix.unlink(global_socket_path[0..global_socket_path_len :0]) catch {};
 
     // Step 5: Set up SIGWINCH handler to update PTY size on terminal resize
     const sa = posix.Sigaction{
@@ -327,9 +364,19 @@ fn runServer(allocator: std.mem.Allocator) !void {
         // Check if PTY has data (bash output)
         if (pollfds[1].revents & posix.POLL.IN != 0) {
             if (posix.read(terminals.items[current_terminal_index].master_fd, &buf)) |n| {
-                if (n == 0) break; // PTY closed
+                if (n == 0) {
+                    // PTY closed - close this terminal and switch to next
+                    closeTerminal(current_terminal_index);
+                    if (terminals.items.len == 0) break;
+                    continue;
+                }
                 _ = posix.write(stdout_fd, buf[0..n]) catch break;
-            } else |_| break;
+            } else |_| {
+                // Read error - close this terminal and switch to next
+                closeTerminal(current_terminal_index);
+                if (terminals.items.len == 0) break;
+                continue;
+            }
         }
 
         // Check if command socket has incoming connection
@@ -338,7 +385,8 @@ fn runServer(allocator: std.mem.Allocator) !void {
             if (client_fd >= 0) {
                 posix.close(client_fd);
             }
-            client_fd = posix.accept(sock_fd, null, null, 0) catch -1;
+            const accept_result = linux.accept4(sock_fd, null, null, 0);
+            client_fd = if (accept_result > 0) @intCast(accept_result) else -1;
 
             if (client_fd >= 0) {
                 // Read command from client
@@ -359,10 +407,15 @@ fn runServer(allocator: std.mem.Allocator) !void {
         }
 
         // Check for hangup/error conditions
-        if (pollfds[0].revents & posix.POLL.HUP != 0 or
-            pollfds[1].revents & posix.POLL.HUP != 0)
-        {
+        if (pollfds[0].revents & posix.POLL.HUP != 0) {
+            // stdin closed - exit completely
             break;
+        }
+        if (pollfds[1].revents & posix.POLL.HUP != 0) {
+            // Current terminal's PTY closed - close it and switch to next
+            closeTerminal(current_terminal_index);
+            if (terminals.items.len == 0) break;
+            continue;
         }
 
         // Reset revents for next poll
@@ -384,10 +437,16 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    // If no arguments, run as server; otherwise run as client
     if (args.len == 1) {
-        // No arguments - run as server
-        try runServer(allocator);
+        // No arguments - check if server is already running
+        if (try findServerSocket(allocator)) |socket_name| {
+            // Server is running, send "new" command (equivalent to "ntt new")
+            defer allocator.free(socket_name);
+            try sendCommand(socket_name, "new");
+        } else {
+            // No server running - start as server
+            try runServer(allocator);
+        }
     } else {
         // Has arguments - run as client
         try runClient(allocator, args);
