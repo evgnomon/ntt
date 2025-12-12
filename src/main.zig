@@ -378,9 +378,7 @@ fn runServer(allocator: std.mem.Allocator) !void {
     var escape_len: usize = 0;
     var in_escape: bool = false;
 
-    // Open log file for escape sequences
-    const log_file = std.fs.createFileAbsolute("/tmp/ntt-escape.log", .{ .truncate = true }) catch null;
-    defer if (log_file) |f| f.close();
+
     var pollfds = [_]posix.pollfd{
         .{ .fd = stdin_fd, .events = posix.POLL.IN, .revents = 0 },
         .{ .fd = global_master_fd, .events = posix.POLL.IN, .revents = 0 },
@@ -416,25 +414,6 @@ fn runServer(allocator: std.mem.Allocator) !void {
 
                         // Check if escape sequence is complete (letter or ~)
                         if ((byte >= 'A' and byte <= 'Z') or (byte >= 'a' and byte <= 'z') or byte == '~') {
-                            // Log the escape sequence
-                            if (log_file) |f| {
-                                var log_buf: [128]u8 = undefined;
-                                var log_len: usize = 0;
-                                const prefix = std.fmt.bufPrint(log_buf[log_len..], "ESC ", .{}) catch unreachable;
-                                log_len += prefix.len;
-                                for (escape_buf[0..escape_len]) |ec| {
-                                    if (ec >= 0x20 and ec < 0x7f) {
-                                        log_buf[log_len] = ec;
-                                        log_len += 1;
-                                    } else {
-                                        const hex = std.fmt.bufPrint(log_buf[log_len..], "\\x{x:0>2}", .{ec}) catch break;
-                                        log_len += hex.len;
-                                    }
-                                }
-                                log_buf[log_len] = '\n';
-                                log_len += 1;
-                                _ = f.write(log_buf[0..log_len]) catch {};
-                            }
                             // Forward the complete escape sequence to the terminal
                             _ = posix.write(terminals.items[current_terminal_index].master_fd, &[_]u8{0x1b}) catch break;
                             _ = posix.write(terminals.items[current_terminal_index].master_fd, escape_buf[0..escape_len]) catch break;
@@ -445,25 +424,14 @@ fn runServer(allocator: std.mem.Allocator) !void {
                         // Check if next byte exists to distinguish between ESC key and escape sequences
                         if (i + 1 < n) {
                             // There's more data, likely an escape sequence
-                            if (log_file) |f| {
-                                _ = f.write("ESC SEQUENCE START\n") catch {};
-                            }
                             in_escape = true;
                             escape_len = 0;
                         } else {
                             // Just ESC key by itself
-                            if (log_file) |f| {
-                                _ = f.write("ESC KEY\n") catch {};
-                            }
                             _ = posix.write(terminals.items[current_terminal_index].master_fd, &[_]u8{byte}) catch break;
                         }
                     } else if (byte == 0x02) {
                         // Ctrl+B detected - switch to next terminal
-                        if (log_file) |f| {
-                            var log_buf: [128]u8 = undefined;
-                            const log_str = std.fmt.bufPrint(&log_buf, "CTRL+B - terminals: {}, current: {}\n", .{ terminals.items.len, current_terminal_index }) catch "";
-                            _ = f.write(log_str) catch {};
-                        }
                         if (terminals.items.len > 1) {
                             current_terminal_index = (current_terminal_index + 1) % terminals.items.len;
                             global_master_fd = terminals.items[current_terminal_index].master_fd;
@@ -479,12 +447,7 @@ fn runServer(allocator: std.mem.Allocator) !void {
                             _ = posix.write(stdout_fd, "\x1b[7m Terminal 1/1 \x1b[0m\r\n") catch {};
                         }
                     } else {
-                        // Regular character - log and forward to terminal
-                        if (log_file) |f| {
-                            var log_buf: [32]u8 = undefined;
-                            const log_str = std.fmt.bufPrint(&log_buf, "CHAR 0x{x:0>2} '{c}'\n", .{ byte, if (byte >= 0x20 and byte < 0x7f) byte else '.' }) catch "";
-                            _ = f.write(log_str) catch {};
-                        }
+                        // Regular character - forward to terminal
                         _ = posix.write(terminals.items[current_terminal_index].master_fd, &[_]u8{byte}) catch break;
                     }
                 }
