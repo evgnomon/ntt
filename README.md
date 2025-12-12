@@ -38,7 +38,7 @@ git clone https://github.com/evgnomon/ntt.git
 cd ntt
 
 # Build with Zig
-zig build -Doptimize=ReleaseFast
+zig build --release=fast
 
 # Install to your PATH
 sudo cp zig-out/bin/ntt /usr/local/bin/
@@ -53,9 +53,6 @@ Download the latest release for your platform from the [releases page](https://g
 ```bash
 # Start a new session
 ntt
-
-# Create a new terminal and switch into
-ntt new
 
 # Switch to the next terminal round-robin
 ntt next
@@ -76,12 +73,6 @@ zig build test
 # Run the binary
 zig build run
 ```
-
-## Roadmap
-
-- [X] Project initialization
-- [X] Core terminal emulation
-- [ ] Proper handling of close event
 
 ## Contributing
 
