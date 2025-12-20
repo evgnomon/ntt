@@ -184,6 +184,16 @@ fn removePidFile() void {
     std.fs.deleteFileAbsolute(PID_FILE_PATH) catch {};
 }
 
+pub fn pidExistsLinux(pid: linux.pid_t) bool {
+    if (pid == 0) return false; // Invalid PID
+
+    var path_buf: [32]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/stat", .{pid}) catch return false;
+
+    std.fs.accessAbsolute(path, .{}) catch return false;
+    return true;
+}
+
 // Read PID from PID file and return socket name, returns null if no valid server
 fn findServerSocket(allocator: std.mem.Allocator) !?[]u8 {
     // Read PID from file
@@ -196,6 +206,14 @@ fn findServerSocket(allocator: std.mem.Allocator) !?[]u8 {
 
     const pid_str = std.mem.trimRight(u8, buf[0..bytes_read], &[_]u8{ '\n', '\r', ' ', '\t' });
     const pid = std.fmt.parseInt(posix.pid_t, pid_str, 10) catch return null;
+
+    // Check if process exists by sending signal 0 (doesn't actually send a signal, just checks)
+
+    if (!pidExistsLinux(pid)) {
+        // Process doesn't exist, clean up stale PID file
+        removePidFile();
+        return null;
+    }
 
     // Build socket name and path
     var socket_name_buf: [64]u8 = undefined;
@@ -377,7 +395,6 @@ fn runServer(allocator: std.mem.Allocator) !void {
     var escape_buf: [32]u8 = undefined;
     var escape_len: usize = 0;
     var in_escape: bool = false;
-
 
     var pollfds = [_]posix.pollfd{
         .{ .fd = stdin_fd, .events = posix.POLL.IN, .revents = 0 },
