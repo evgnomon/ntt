@@ -52,10 +52,10 @@ Download the latest release for your platform from the [releases page](https://g
 
 ```bash
 # Start a new session
-ntt
+ntt # or CTRL+n after first run
 
 # Switch to the next terminal round-robin
-ntt next
+ntt next # or CTRL+b
 ```
 
 ## Key Bindings
