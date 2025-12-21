@@ -463,6 +463,32 @@ fn runServer(allocator: std.mem.Allocator) !void {
                             // Only one terminal, just show status
                             _ = posix.write(stdout_fd, "\x1b[7m Terminal 1/1 \x1b[0m\r\n") catch {};
                         }
+                    } else if (byte == 0x0e) {
+                        // Ctrl+N detected - create new terminal session
+                        const new_session = createTerminalSession(&ws) catch |err| {
+                            var err_buf: [128]u8 = undefined;
+                            const err_msg = std.fmt.bufPrint(&err_buf, "\r\nFailed to create terminal: {}\r\n", .{err}) catch "Failed to create terminal\r\n";
+                            _ = posix.write(stdout_fd, err_msg) catch {};
+                            continue;
+                        };
+                        terminals.append(allocator, new_session) catch |err| {
+                            posix.close(new_session.master_fd);
+                            _ = posix.waitpid(new_session.child_pid, 0);
+                            var err_buf: [128]u8 = undefined;
+                            const err_msg = std.fmt.bufPrint(&err_buf, "\r\nFailed to add terminal: {}\r\n", .{err}) catch "Failed to add terminal\r\n";
+                            _ = posix.write(stdout_fd, err_msg) catch {};
+                            continue;
+                        };
+                        // Switch to the new terminal
+                        current_terminal_index = terminals.items.len - 1;
+                        global_master_fd = new_session.master_fd;
+                        // Print a visual indicator
+                        _ = posix.write(stdout_fd, "\x1b[2J\x1b[H") catch {}; // Clear screen and move to top
+                        _ = posix.write(stdout_fd, "\x1b[7m") catch {}; // Reverse video
+                        var status_buf: [64]u8 = undefined;
+                        const status = std.fmt.bufPrint(&status_buf, " New Terminal {}/{} ", .{ current_terminal_index + 1, terminals.items.len }) catch "";
+                        _ = posix.write(stdout_fd, status) catch {};
+                        _ = posix.write(stdout_fd, "\x1b[0m\r\n") catch {}; // Reset formatting
                     } else {
                         // Regular character - forward to terminal
                         _ = posix.write(terminals.items[current_terminal_index].master_fd, &[_]u8{byte}) catch break;
