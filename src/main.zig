@@ -204,7 +204,7 @@ fn findServerSocket(allocator: std.mem.Allocator) !?[]u8 {
     const bytes_read = file.read(&buf) catch return null;
     if (bytes_read == 0) return null;
 
-    const pid_str = std.mem.trimRight(u8, buf[0..bytes_read], &[_]u8{ '\n', '\r', ' ', '\t' });
+    const pid_str = std.mem.trimEnd(u8, buf[0..bytes_read], &[_]u8{ '\n', '\r', ' ', '\t' });
     const pid = std.fmt.parseInt(posix.pid_t, pid_str, 10) catch return null;
 
     // Check if process exists by sending signal 0 (doesn't actually send a signal, just checks)
